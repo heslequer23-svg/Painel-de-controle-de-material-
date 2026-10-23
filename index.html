@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard Controle de Estoque Esportivo | EFAF • EM • EFAI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-layout">
+    <!-- SIDEBAR DE CATEGORIAS -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">🏆</div>
+        <div>
+          <h1>Estoque Esportivo</h1>
+          <span class="brand-subtitle">EFAF • EM • EFAI (2026/2027)</span>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <p class="sidebar-label">VISÃO PRINCIPAL</p>
+        <nav class="group-nav" id="groupNav">
+          <button class="group-btn active" data-group="todos">
+            <span>📊 Visão Geral Completa</span>
+            <span class="badge-count" id="count-group-todos">0</span>
+          </button>
+          <button class="group-btn" data-group="estoque_atual">
+            <span>🏟️ Estoque Atual (Gaiolas/Bolsa)</span>
+            <span class="badge-count" id="count-group-estoque">0</span>
+          </button>
+          <button class="group-btn" data-group="reposicao_2027">
+            <span>🛒 Reposição & Compras 2027</span>
+            <span class="badge-count" id="count-group-reposicao">0</span>
+          </button>
+        </nav>
+      </div>
+
+      <div class="sidebar-section">
+        <p class="sidebar-label">CATEGORIAS ESPORTIVAS</p>
+        <nav class="category-nav" id="categoryNav">
+          <!-- Renderizado via JS -->
+        </nav>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="btn btn-secondary btn-full" id="btnExportBackup" title="Exportar todos os dados e fotos">
+          💾 Exportar Backup (.json)
+        </button>
+        <label class="btn btn-outline btn-full" for="inputImportBackup" title="Restaurar backup salvo">
+          📂 Importar Backup
+          <input type="file" id="inputImportBackup" accept=".json" hidden />
+        </label>
+        <button class="btn btn-ghost btn-full" id="btnResetData" title="Restaurar dados originais da planilha">
+          🔄 Restaurar Padrão da Planilha
+        </button>
+      </div>
+    </aside>
+
+    <!-- CONTEÚDO PRINCIPAL -->
+    <main class="main-content">
+      <!-- TOPBAR -->
+      <header class="topbar">
+        <div class="topbar-title">
+          <h2 id="currentViewTitle">📦 Todas as Categorias</h2>
+          <p id="currentViewSubtitle">Controle de materiais, estado de conservação e fotos de inspeção por item</p>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn btn-outline" id="btnExportCSV">
+            📄 Exportar Planilha (CSV)
+          </button>
+          <button class="btn btn-primary" id="btnNewItem">
+            ➕ Novo Item
+          </button>
+        </div>
+      </header>
+
+      <!-- CARDS DE RESUMO (KPIs) -->
+      <section class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-icon kpi-blue">📋</div>
+          <div class="kpi-info">
+            <span class="kpi-label">Registros Listados</span>
+            <strong class="kpi-value" id="kpiTotalRegistros">0</strong>
+            <span class="kpi-sub" id="kpiTotalUnidades">0 unidades somadas</span>
+          </div>
+        </div>
+
+        <div class="kpi-card kpi-clickable" data-filter-cond="ok" title="Clique para filtrar itens em bom estado">
+          <div class="kpi-icon kpi-green">✅</div>
+          <div class="kpi-info">
+            <span class="kpi-label">Conservação Boa / Novo</span>
+            <strong class="kpi-value" id="kpiBomEstado">0</strong>
+            <span class="kpi-sub">Prontos para uso</span>
+          </div>
+        </div>
+
+        <div class="kpi-card kpi-clickable" data-filter-cond="medio" title="Clique para filtrar itens em estado médio">
+          <div class="kpi-icon kpi-yellow">⚠️</div>
+          <div class="kpi-info">
+            <span class="kpi-label">Estado Médio / Atenção</span>
+            <strong class="kpi-value" id="kpiMedioEstado">0</strong>
+            <span class="kpi-sub">Com desgaste ou reparos</span>
+          </div>
+        </div>
+
+        <div class="kpi-card kpi-clickable" data-filter-cond="pessimo" title="Clique para filtrar itens em estado péssimo">
+          <div class="kpi-icon kpi-red">🚨</div>
+          <div class="kpi-info">
+            <span class="kpi-label">Péssimo / Furados</span>
+            <strong class="kpi-value" id="kpiPessimoEstado">0</strong>
+            <span class="kpi-sub">Necessitam substituição</span>
+          </div>
+        </div>
+
+        <div class="kpi-card kpi-clickable" data-filter-cond="com_foto" title="Clique para filtrar itens com fotos registradas">
+          <div class="kpi-icon kpi-purple">📸</div>
+          <div class="kpi-info">
+            <span class="kpi-label">Itens com Foto</span>
+            <strong class="kpi-value" id="kpiComFoto">0</strong>
+            <span class="kpi-sub">Inspeção visual anexada</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- BARRA DE FILTROS E BUSCA -->
+      <section class="filters-bar">
+        <div class="search-box">
+          <span class="search-icon">🔍</span>
+          <input
+            type="text"
+            id="searchInput"
+            placeholder="Buscar por item, marca (Penalty, Kipsta...), observação ('furada')..."
+          />
+        </div>
+
+        <div class="filter-group">
+          <label for="filterSegmento">Segmento / Local:</label>
+          <select id="filterSegmento">
+            <option value="TODOS">Todos os Locais</option>
+            <option value="EFAF">EFAF (Primeira Gaiola)</option>
+            <option value="EM">EM (Gaiola Elevador)</option>
+            <option value="EFAI">EFAI (Bolsa EFAI / Planejamento)</option>
+            <option value="EFAF/EM">EFAF/EM (Reposição 2027)</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label for="filterConservacao">Conservação:</label>
+          <select id="filterConservacao">
+            <option value="TODOS">Todas as Condições</option>
+            <option value="Novo">🟢 Novo</option>
+            <option value="Bom">🟢 Bom</option>
+            <option value="Bom/Médio">🟡 Bom/Médio</option>
+            <option value="Médio">🟡 Médio</option>
+            <option value="Médio/Péssimo">🟠 Médio/Péssimo</option>
+            <option value="Péssimo">🔴 Péssimo</option>
+            <option value="ND">⚪ ND (Não Disponível)</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label for="filterPrioridade">Prioridade:</label>
+          <select id="filterPrioridade">
+            <option value="TODOS">Todas</option>
+            <option value="Alta">🔥 Prioridade Alta</option>
+            <option value="Média">⚡ Prioridade Média</option>
+            <option value="Normal">📋 Normal / Sem Prioridade</option>
+          </select>
+        </div>
+
+        <div class="view-toggle">
+          <button class="view-btn active" id="btnViewCards" title="Visualização em Cards com Fotos">
+            🗂️ Cards
+          </button>
+          <button class="view-btn" id="btnViewTable" title="Visualização em Tabela">
+            📑 Tabela
+          </button>
+        </div>
+      </section>
+
+      <!-- RESUMO RÁPIDO POR CATEGORIAS (BARRA DE PROGRESSO / DISTRIBUIÇÃO) -->
+      <section class="category-summary-strip" id="categorySummaryStrip">
+        <!-- Renderizado via JS -->
+      </section>
+
+      <!-- CONTAINER DE ITENS (CARDS OU TABELA) -->
+      <section id="itemsContainer" class="items-grid">
+        <!-- Renderizado via JS -->
+      </section>
+    </main>
+  </div>
+
+  <!-- MODAL: ADICIONAR / GERENCIAR FOTOS DA CONDIÇÃO DO ITEM -->
+  <div class="modal-backdrop hidden" id="photoModal">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <div>
+          <h3 id="photoModalTitle">📸 Condição Visual do Item</h3>
+          <p id="photoModalSubtitle" class="modal-subtitle"></p>
+        </div>
+        <button class="modal-close" id="closePhotoModal">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Rapida mudança de conservação dentro do modal de foto -->
+        <div class="condition-quick-bar">
+          <div>
+            <label>Estado de Conservação Atual:</label>
+            <select id="modalQuickConservacao" class="select-status">
+              <option value="Novo">🟢 Novo</option>
+              <option value="Bom">🟢 Bom</option>
+              <option value="Bom/Médio">🟡 Bom/Médio</option>
+              <option value="Médio">🟡 Médio</option>
+              <option value="Médio/Péssimo">🟠 Médio/Péssimo</option>
+              <option value="Péssimo">🔴 Péssimo</option>
+              <option value="ND">⚪ ND</option>
+            </select>
+          </div>
+          <div class="quick-obs-field">
+            <label>Observação sobre a condição (ex.: Furada, Desgastada, Recolada):</label>
+            <input type="text" id="modalQuickObs" placeholder="Descreva os detalhes da condição vista na imagem..." />
+          </div>
+          <button class="btn btn-primary" id="btnSaveQuickCondition">Salvar Status</button>
+        </div>
+
+        <!-- Área de Upload Drag & Drop ou Câmera -->
+        <div class="upload-dropzone" id="uploadDropzone">
+          <div class="dropzone-icon">📷</div>
+          <h4>Arraste fotos aqui ou clique para selecionar</h4>
+          <p>Registre fotos mostrando se a bola/material está novo, desgastado, furado ou remendado.</p>
+          <div class="upload-buttons">
+            <label class="btn btn-primary" for="photoFileInput">
+              🖼️ Escolher Imagem / Tirar Foto
+              <input type="file" id="photoFileInput" accept="image/*" multiple hidden />
+            </label>
+          </div>
+        </div>
+
+        <!-- Galeria de fotos do item -->
+        <div class="photo-gallery-section">
+          <h4>Fotos Registradas (<span id="photoCountLabel">0</span>)</h4>
+          <div class="photo-gallery-grid" id="photoGalleryGrid">
+            <!-- Fotos serão listadas aqui -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: EDITAR / CRIAR ITEM -->
+  <div class="modal-backdrop hidden" id="itemModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="itemModalTitle">✏️ Editar Item</h3>
+        <button class="modal-close" id="closeItemModal">&times;</button>
+      </div>
+      <form id="itemForm" class="modal-body form-grid">
+        <input type="hidden" id="formItemId" />
+
+        <div class="form-control">
+          <label for="formGroup">Tipo de Registro *</label>
+          <select id="formGroup" required>
+            <option value="estoque_atual">🏟️ Estoque Atual (Gaiola / Bolsa)</option>
+            <option value="reposicao_2027">🛒 Reposição / Planejamento 2027</option>
+          </select>
+        </div>
+
+        <div class="form-control">
+          <label for="formCategoria">Categoria Esportiva *</label>
+          <select id="formCategoria" required>
+            <option value="Vôlei">🏐 Vôlei</option>
+            <option value="Basquete">🏀 Basquete</option>
+            <option value="Handebol">🤾 Handebol</option>
+            <option value="Futsal">⚽ Futsal</option>
+            <option value="Society">🥅 Society & Campo</option>
+            <option value="Rugby">🏈 Rugby</option>
+            <option value="Ping Pong">🏓 Ping Pong</option>
+            <option value="Recreação & Extras">🎪 Recreação & Iniciação</option>
+            <option value="Suporte">🛠️ Suporte & Acessórios</option>
+          </select>
+        </div>
+
+        <div class="form-control">
+          <label for="formSegmento">Segmento *</label>
+          <select id="formSegmento" required>
+            <option value="EFAF">EFAF</option>
+            <option value="EM">EM</option>
+            <option value="EFAI">EFAI</option>
+            <option value="EFAF/EM">EFAF/EM</option>
+          </select>
+        </div>
+
+        <div class="form-control">
+          <label for="formLocal">Local de Armazenamento *</label>
+          <input type="text" id="formLocal" placeholder="Ex: Primeira Gaiola, Gaiola Elevador, Bolsa EFAI" required />
+        </div>
+
+        <div class="form-control full-width">
+          <label for="formItemName">Nome do Item *</label>
+          <input type="text" id="formItemName" placeholder="Ex: Bola de Vôlei Penalty 8.0" required />
+        </div>
+
+        <div class="form-control full-width">
+          <label for="formMarcaModelo">Marca / Modelo</label>
+          <input type="text" id="formMarcaModelo" placeholder="Ex: Penalty, Kipsta, Topper..." />
+        </div>
+
+        <div class="form-control">
+          <label for="formQuantidade">Quantidade *</label>
+          <input type="text" id="formQuantidade" placeholder="Ex: 8, OK, 12..." required />
+        </div>
+
+        <div class="form-control">
+          <label for="formQntMinima">Quantidade Mínima</label>
+          <input type="text" id="formQntMinima" placeholder="Ex: 6, 10, -" />
+        </div>
+
+        <div class="form-control">
+          <label for="formConservacao">Estado de Conservação *</label>
+          <select id="formConservacao" required>
+            <option value="Novo">🟢 Novo</option>
+            <option value="Bom">🟢 Bom</option>
+            <option value="Bom/Médio">🟡 Bom/Médio</option>
+            <option value="Médio">🟡 Médio</option>
+            <option value="Médio/Péssimo">🟠 Médio/Péssimo</option>
+            <option value="Péssimo">🔴 Péssimo</option>
+            <option value="ND">⚪ ND (Não Disponível)</option>
+          </select>
+        </div>
+
+        <div class="form-control">
+          <label for="formPrioridade">Prioridade de Compra/Atenção</label>
+          <select id="formPrioridade">
+            <option value="Normal">📋 Normal / Sem Prioridade</option>
+            <option value="Média">⚡ Prioridade Média</option>
+            <option value="Alta">🔥 Prioridade Alta</option>
+          </select>
+        </div>
+
+        <div class="form-control">
+          <label for="formTemNoColegio">Tem no Colégio?</label>
+          <select id="formTemNoColegio">
+            <option value="Sim">Sim</option>
+            <option value="Não">Não</option>
+            <option value="Reposição">Lista de Reposição</option>
+          </select>
+        </div>
+
+        <div class="form-control full-width">
+          <label for="formObservacoes">Observações de Condição</label>
+          <textarea id="formObservacoes" rows="2" placeholder="Ex: 1 em péssimo estado, Furada, Recolada com cola contato..."></textarea>
+        </div>
+
+        <div class="form-control full-width">
+          <label for="formLink">Link de Referência p/ Compra (Mercado Livre, Decathlon, Amazon...)</label>
+          <input type="url" id="formLink" placeholder="https://..." />
+        </div>
+
+        <div class="modal-footer full-width">
+          <button type="button" class="btn btn-danger" id="btnDeleteItem" style="margin-right:auto;">🗑️ Excluir</button>
+          <button type="button" class="btn btn-ghost" id="cancelItemModal">Cancelar</button>
+          <button type="submit" class="btn btn-primary">💾 Salvar Item</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- LIGHTBOX PARA ZOOM DE IMAGEM -->
+  <div class="lightbox hidden" id="lightbox">
+    <button class="lightbox-close" id="closeLightbox">&times;</button>
+    <img id="lightboxImg" src="" alt="Visualização ampliada da condição do item" />
+    <div class="lightbox-caption" id="lightboxCaption"></div>
+  </div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
