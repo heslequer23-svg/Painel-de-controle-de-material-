@@ -1,5 +1,12 @@
 // Base de Dados Completa extraída do PDF de Controle de Estoque e Reposição 2027 (EFAF, EM, EFAI)
 
+const INITIAL_SEGMENTOS = [
+  "EFAF",
+  "EM",
+  "EFAI",
+  "EFAF/EM"
+];
+
 const INITIAL_INVENTORY_DATA = [
   // =========================================================================
   // TABELA 1: ESTOQUE ATUAL - EFAF (Primeira Gaiola) & EM (Gaiola Elevador)

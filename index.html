@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
   <div class="app-layout">
@@ -37,6 +38,17 @@
             <span class="badge-count" id="count-group-reposicao">0</span>
           </button>
         </nav>
+      </div>
+
+      <!-- GESTÃO DE SEGMENTOS -->
+      <div class="sidebar-section">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 0.6rem;">
+          <p class="sidebar-label" style="margin-bottom:0;">SEGMENTOS</p>
+          <button class="btn-icon" id="btnManageSegments" title="Gerenciar Segmentos (Adicionar, Renomear, Excluir)">⚙️ Gerenciar</button>
+        </div>
+        <div class="segment-chips" id="sidebarSegmentList">
+          <!-- Renderizado via JS -->
+        </div>
       </div>
 
       <div class="sidebar-section">
@@ -69,6 +81,13 @@
           <p id="currentViewSubtitle">Controle de materiais, estado de conservação e fotos de inspeção por item</p>
         </div>
         <div class="topbar-actions">
+          <button class="btn btn-outline" id="btnCloudConfig" title="Configurar conexão online com Supabase">
+            <span id="cloudStatusDot" class="status-dot dot-offline"></span>
+            <span id="cloudStatusText">☁️ Conectar Supabase</span>
+          </button>
+          <button class="btn btn-outline" id="btnManageSegmentsTopbar">
+            🏷️ Gerenciar Segmentos
+          </button>
           <button class="btn btn-outline" id="btnExportCSV">
             📄 Exportar Planilha (CSV)
           </button>
@@ -140,12 +159,11 @@
         <div class="filter-group">
           <label for="filterSegmento">Segmento / Local:</label>
           <select id="filterSegmento">
-            <option value="TODOS">Todos os Locais</option>
-            <option value="EFAF">EFAF (Primeira Gaiola)</option>
-            <option value="EM">EM (Gaiola Elevador)</option>
-            <option value="EFAI">EFAI (Bolsa EFAI / Planejamento)</option>
-            <option value="EFAF/EM">EFAF/EM (Reposição 2027)</option>
+            <!-- Populado dinamicamente -->
           </select>
+          <button type="button" class="btn btn-secondary" id="btnManageSegmentsFilter" style="padding: 0.55rem 0.75rem; font-size: 0.78rem;" title="Criar, editar ou excluir segmentos">
+            ⚙️ Editar Segmentos
+          </button>
         </div>
 
         <div class="filter-group">
@@ -182,7 +200,7 @@
         </div>
       </section>
 
-      <!-- RESUMO RÁPIDO POR CATEGORIAS (BARRA DE PROGRESSO / DISTRIBUIÇÃO) -->
+      <!-- RESUMO RÁPIDO POR CATEGORIAS -->
       <section class="category-summary-strip" id="categorySummaryStrip">
         <!-- Renderizado via JS -->
       </section>
@@ -192,6 +210,132 @@
         <!-- Renderizado via JS -->
       </section>
     </main>
+  </div>
+
+  <!-- MODAL: CONEXÃO SUPABASE (ACESSO ONLINE EM NUVEM) -->
+  <div class="modal-backdrop hidden" id="supabaseModal">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <div>
+          <h3>☁️ Conexão Online — Supabase Cloud</h3>
+          <p class="modal-subtitle">Sincronize itens, segmentos e fotos em tempo real entre todos os computadores e celulares</p>
+        </div>
+        <button class="modal-close" id="closeSupabaseModal">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="supabase-status-banner" id="supabaseModalStatusBanner">
+          Status: <strong>Modo Local (Offline)</strong> — Insira as credenciais do seu projeto Supabase abaixo para ativar a nuvem.
+        </div>
+
+        <div class="form-grid">
+          <div class="form-control full-width">
+            <label for="inputSupabaseUrl">Project URL do Supabase *</label>
+            <input type="url" id="inputSupabaseUrl" placeholder="https://xxxxxxxxxxxx.supabase.co" />
+          </div>
+
+          <div class="form-control full-width">
+            <label for="inputSupabaseKey">API Key (anon / public) *</label>
+            <input type="text" id="inputSupabaseKey" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." />
+          </div>
+        </div>
+
+        <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+          <button type="button" class="btn btn-primary" id="btnConnectSupabase">
+            🔗 Conectar e Sincronizar Agora
+          </button>
+          <button type="button" class="btn btn-secondary" id="btnPushLocalToCloud" title="Envia todos os itens locais atuais para o banco do Supabase">
+            ⬆️ Enviar Dados Locais p/ Nuvem
+          </button>
+          <button type="button" class="btn btn-outline" id="btnPullCloudToLocal" title="Baixa os dados que estão na nuvem do Supabase">
+            ⬇️ Baixar Dados da Nuvem
+          </button>
+          <button type="button" class="btn btn-danger" id="btnDisconnectSupabase" style="margin-left:auto;">
+            Desconectar
+          </button>
+        </div>
+
+        <div class="sql-setup-box">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+            <strong style="font-size:0.84rem; color:#93c5fd;">🛠️ 1º Passo no Supabase: Criar as Tabelas (SQL Editor)</strong>
+            <button type="button" class="btn btn-outline" id="btnCopySql" style="padding:0.3rem 0.65rem; font-size:0.75rem;">
+              📋 Copiar SQL
+            </button>
+          </div>
+          <p style="font-size:0.78rem; color:var(--text-muted); margin-bottom:0.5rem;">
+            No painel do Supabase, abra o menu <strong>SQL Editor</strong>, cole o código abaixo e clique em <strong>Run</strong>:
+          </p>
+          <pre id="sqlCodeBlock" class="sql-code-preview">CREATE TABLE IF NOT EXISTS public.estoque_esportivo_itens (
+  id TEXT PRIMARY KEY,
+  "group" TEXT NOT NULL DEFAULT 'estoque_atual',
+  segmento TEXT NOT NULL DEFAULT 'EFAF',
+  local TEXT NOT NULL DEFAULT '',
+  categoria TEXT NOT NULL DEFAULT 'Vôlei',
+  item TEXT NOT NULL,
+  "marcaModelo" TEXT DEFAULT '',
+  quantidade TEXT DEFAULT '0',
+  "qntMinima" TEXT DEFAULT '-',
+  conservacao TEXT DEFAULT 'Bom',
+  observacoes TEXT DEFAULT '',
+  prioridade TEXT DEFAULT 'Normal',
+  "temNoColegio" TEXT DEFAULT 'Sim',
+  "linkReferencia" TEXT DEFAULT '',
+  imagens JSONB DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.estoque_esportivo_config (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE public.estoque_esportivo_itens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.estoque_esportivo_config ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Acesso Total Publico Itens" ON public.estoque_esportivo_itens;
+CREATE POLICY "Acesso Total Publico Itens" ON public.estoque_esportivo_itens FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Acesso Total Publico Config" ON public.estoque_esportivo_config;
+CREATE POLICY "Acesso Total Publico Config" ON public.estoque_esportivo_config FOR ALL USING (true) WITH CHECK (true);</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: GERENCIAR SEGMENTOS (CRIAR, EDITAR, EXCLUIR) -->
+  <div class="modal-backdrop hidden" id="segmentModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <h3>🏷️ Gerenciar Segmentos</h3>
+          <p class="modal-subtitle">Crie novos segmentos, edite os nomes ou remova os existentes</p>
+        </div>
+        <button class="modal-close" id="closeSegmentModal">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Adicionar novo segmento -->
+        <div class="segment-add-box">
+          <label for="newSegmentInput"><strong>Novo Segmento:</strong></label>
+          <div style="display:flex; gap:0.5rem; margin-top:0.4rem;">
+            <input type="text" id="newSegmentInput" placeholder="Ex: EI (Educação Infantil), Fundamental 1..." style="flex:1;" />
+            <button class="btn btn-primary" id="btnAddNewSegment">➕ Adicionar</button>
+          </div>
+        </div>
+
+        <!-- Lista de Segmentos Existentes -->
+        <div style="margin-top:1rem;">
+          <h4 style="font-size:0.9rem; color:var(--text-muted); margin-bottom:0.75rem;">Segmentos Cadastrados no Sistema</h4>
+          <div class="segment-manage-list" id="segmentManageList">
+            <!-- Renderizado via JS -->
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-primary" id="btnCloseSegmentModalBtn">Pronto</button>
+      </div>
+    </div>
   </div>
 
   <!-- MODAL: ADICIONAR / GERENCIAR FOTOS DA CONDIÇÃO DO ITEM -->
@@ -206,7 +350,6 @@
       </div>
 
       <div class="modal-body">
-        <!-- Rapida mudança de conservação dentro do modal de foto -->
         <div class="condition-quick-bar">
           <div>
             <label>Estado de Conservação Atual:</label>
@@ -227,7 +370,6 @@
           <button class="btn btn-primary" id="btnSaveQuickCondition">Salvar Status</button>
         </div>
 
-        <!-- Área de Upload Drag & Drop ou Câmera -->
         <div class="upload-dropzone" id="uploadDropzone">
           <div class="dropzone-icon">📷</div>
           <h4>Arraste fotos aqui ou clique para selecionar</h4>
@@ -240,11 +382,10 @@
           </div>
         </div>
 
-        <!-- Galeria de fotos do item -->
         <div class="photo-gallery-section">
           <h4>Fotos Registradas (<span id="photoCountLabel">0</span>)</h4>
           <div class="photo-gallery-grid" id="photoGalleryGrid">
-            <!-- Fotos serão listadas aqui -->
+            <!-- Fotos listadas aqui -->
           </div>
         </div>
       </div>
@@ -285,12 +426,12 @@
         </div>
 
         <div class="form-control">
-          <label for="formSegmento">Segmento *</label>
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <label for="formSegmento">Segmento *</label>
+            <a href="#" id="linkCreateSegmentFast" style="font-size:0.75rem; color:#60a5fa; text-decoration:none;">+ Novo</a>
+          </div>
           <select id="formSegmento" required>
-            <option value="EFAF">EFAF</option>
-            <option value="EM">EM</option>
-            <option value="EFAI">EFAI</option>
-            <option value="EFAF/EM">EFAF/EM</option>
+            <!-- Populado dinamicamente -->
           </select>
         </div>
 

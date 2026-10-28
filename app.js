@@ -1,11 +1,20 @@
-// Lógica do Dashboard de Controle de Estoque Esportivo (EFAF, EM, EFAI)
-// Inclui armazenamento persistente IndexedDB para fotos de condição dos itens
+// Lógica do Dashboard de Controle de Estoque Esportivo (EFAF, EM, EFAI e Personalizados)
+// Inclui gerenciamento dinâmico de segmentos e armazenamento persistente IndexedDB
 
 const DB_NAME = "EstoqueEsportivoDB_v1";
 const STORE_NAME = "inventory_items";
+const SEGMENTS_STORAGE_KEY = "EstoqueEsportivo_Segmentos_v1";
+const SUPABASE_CONFIG_KEY = "EstoqueEsportivo_SupabaseConfig_v1";
+
+const SUPABASE_ITEMS_TABLE = "estoque_esportivo_itens";
+const SUPABASE_CONFIG_TABLE = "estoque_esportivo_config";
+
+let supabaseClient = null;
+let realtimeChannel = null;
 
 let state = {
   items: [],
+  segmentos: [],
   activeGroup: "todos",         // 'todos' | 'estoque_atual' | 'reposicao_2027'
   activeCategory: "Todas",      // 'Todas' | 'Vôlei' | 'Basquete' | ...
   searchQuery: "",
@@ -14,11 +23,160 @@ let state = {
   prioridadeFilter: "TODOS",
   quickCondFilter: null,        // 'ok' | 'medio' | 'pessimo' | 'com_foto'
   viewMode: "cards",            // 'cards' | 'table'
-  currentPhotoItemId: null
+  currentPhotoItemId: null,
+  cloudConnected: false
 };
 
 // ============================================================================
-// CAMADA DE BANCO DE DADOS LOCAL (IndexedDB para suportar múltiplas fotos)
+// CAMADA DE NUVEM ONLINE (SUPABASE REALTIME + POSTGRESQL)
+// ============================================================================
+function getSavedSupabaseCredentials() {
+  try {
+    const raw = localStorage.getItem(SUPABASE_CONFIG_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function updateCloudStatusUI(status, message) {
+  const dot = document.getElementById("cloudStatusDot");
+  const text = document.getElementById("cloudStatusText");
+  const banner = document.getElementById("supabaseModalStatusBanner");
+
+  if (!dot || !text) return;
+
+  dot.className = "status-dot";
+  if (status === "online") {
+    dot.classList.add("dot-online");
+    text.textContent = "☁️ Online (Supabase)";
+    state.cloudConnected = true;
+    if (banner) {
+      banner.innerHTML = `Status: <strong style="color:#10b981;">🟢 Conectado ao Supabase Cloud</strong> — ${message || "Sincronização online ativa em tempo real."}`;
+    }
+  } else if (status === "syncing") {
+    dot.classList.add("dot-syncing");
+    text.textContent = "☁️ Sincronizando...";
+    if (banner && message) {
+      banner.innerHTML = `Status: <strong style="color:#f59e0b;">⏳ Sincronizando...</strong> — ${message}`;
+    }
+  } else {
+    dot.classList.add("dot-offline");
+    text.textContent = "☁️ Conectar Supabase";
+    state.cloudConnected = false;
+    if (banner) {
+      banner.innerHTML = `Status: <strong>Modo Local (Offline)</strong> — ${message || "Insira a Project URL e API Key do seu projeto Supabase abaixo."}`;
+    }
+  }
+}
+
+async function initSupabaseConnection(url, key, autoSync = true) {
+  if (!url || !key || !window.supabase) {
+    updateCloudStatusUI("offline");
+    return false;
+  }
+
+  try {
+    updateCloudStatusUI("syncing", "Conectando ao banco de dados Supabase...");
+    supabaseClient = window.supabase.createClient(url.trim(), key.trim());
+
+    // Testa leitura da tabela de itens
+    const { data: cloudItems, error: itemsError } = await supabaseClient
+      .from(SUPABASE_ITEMS_TABLE)
+      .select("*");
+
+    if (itemsError) {
+      console.error("Erro Supabase:", itemsError);
+      updateCloudStatusUI(
+        "offline",
+        `Erro ao acessar tabela (${itemsError.message}). Certifique-se de executar o comando SQL no Supabase!`
+      );
+      return false;
+    }
+
+    // Busca segmentos salvos na nuvem
+    const { data: segRow } = await supabaseClient
+      .from(SUPABASE_CONFIG_TABLE)
+      .select("value")
+      .eq("key", "segmentos")
+      .maybeSingle();
+
+    if (autoSync) {
+      if (cloudItems && cloudItems.length > 0) {
+        // Nuvem já tem dados -> atualiza local com dados da nuvem
+        state.items = cloudItems;
+        await saveAllItemsToLocalOnly(state.items);
+      } else if (state.items.length > 0) {
+        // Nuvem está vazia -> sobe dados locais automaticamente para a nuvem
+        await supabaseClient.from(SUPABASE_ITEMS_TABLE).upsert(state.items);
+      }
+
+      if (segRow && Array.isArray(segRow.value) && segRow.value.length > 0) {
+        state.segmentos = segRow.value;
+        localStorage.setItem(SEGMENTS_STORAGE_KEY, JSON.stringify(state.segmentos));
+      } else {
+        await supabaseClient.from(SUPABASE_CONFIG_TABLE).upsert({
+          key: "segmentos",
+          value: state.segmentos,
+          updated_at: new Date().toISOString()
+        });
+      }
+    }
+
+    // Assina mudanças em tempo real (Realtime)
+    subscribeToRealtimeChanges();
+
+    updateCloudStatusUI("online", `Sincronizado (${state.items.length} itens na nuvem).`);
+    renderAll();
+    return true;
+  } catch (err) {
+    console.error("Falha ao conectar Supabase:", err);
+    updateCloudStatusUI("offline", "Não foi possível conectar. Verifique a URL e a Anon Key.");
+    return false;
+  }
+}
+
+function subscribeToRealtimeChanges() {
+  if (!supabaseClient) return;
+  if (realtimeChannel) {
+    supabaseClient.removeChannel(realtimeChannel);
+  }
+
+  realtimeChannel = supabaseClient
+    .channel("estoque-realtime-channel")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: SUPABASE_ITEMS_TABLE },
+      async () => {
+        const { data } = await supabaseClient.from(SUPABASE_ITEMS_TABLE).select("*");
+        if (data) {
+          state.items = data;
+          await saveAllItemsToLocalOnly(state.items);
+          renderAll();
+        }
+      }
+    )
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: SUPABASE_CONFIG_TABLE },
+      async () => {
+        const { data } = await supabaseClient
+          .from(SUPABASE_CONFIG_TABLE)
+          .select("value")
+          .eq("key", "segmentos")
+          .maybeSingle();
+        if (data && Array.isArray(data.value)) {
+          state.segmentos = data.value;
+          localStorage.setItem(SEGMENTS_STORAGE_KEY, JSON.stringify(state.segmentos));
+          renderAll();
+        }
+      }
+    )
+    .subscribe();
+}
+
+// ============================================================================
+// CAMADA DE BANCO DE DADOS LOCAL (IndexedDB com suporte a segmentos dinâmicos)
 // ============================================================================
 function openDatabase() {
   return new Promise((resolve, reject) => {
@@ -34,24 +192,40 @@ function openDatabase() {
   });
 }
 
-async function loadItemsFromDB() {
+async function loadDataFromDB() {
+  const savedSegs = localStorage.getItem(SEGMENTS_STORAGE_KEY);
+  let segmentos = null;
+  try {
+    segmentos = savedSegs ? JSON.parse(savedSegs) : null;
+  } catch (e) {
+    segmentos = null;
+  }
+
   try {
     const db = await openDatabase();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readonly");
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.getAll();
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      const storeItems = tx.objectStore(STORE_NAME);
+      const reqItems = storeItems.getAll();
+      reqItems.onsuccess = () => {
+        resolve({
+          items: reqItems.result || [],
+          segmentos
+        });
+      };
+      reqItems.onerror = () => reject(reqItems.error);
     });
   } catch (err) {
     console.warn("Fallback para LocalStorage:", err);
-    const saved = localStorage.getItem(DB_NAME);
-    return saved ? JSON.parse(saved) : [];
+    const savedItems = localStorage.getItem(DB_NAME);
+    return {
+      items: savedItems ? JSON.parse(savedItems) : [],
+      segmentos
+    };
   }
 }
 
-async function saveAllItemsToDB(items) {
+async function saveAllItemsToLocalOnly(items) {
   try {
     const db = await openDatabase();
     return new Promise((resolve, reject) => {
@@ -67,10 +241,40 @@ async function saveAllItemsToDB(items) {
   }
 }
 
+async function saveAllItemsToDB(items) {
+  await saveAllItemsToLocalOnly(items);
+
+  if (supabaseClient && state.cloudConnected) {
+    try {
+      updateCloudStatusUI("syncing", "Salvando todos os itens na nuvem...");
+      await supabaseClient.from(SUPABASE_ITEMS_TABLE).upsert(items);
+      updateCloudStatusUI("online", "Todos os itens sincronizados.");
+    } catch (e) {
+      console.error("Erro ao sincronizar lote com Supabase:", e);
+    }
+  }
+}
+
+async function saveSegmentsToDB(segments) {
+  localStorage.setItem(SEGMENTS_STORAGE_KEY, JSON.stringify(segments));
+
+  if (supabaseClient && state.cloudConnected) {
+    try {
+      await supabaseClient.from(SUPABASE_CONFIG_TABLE).upsert({
+        key: "segmentos",
+        value: segments,
+        updated_at: new Date().toISOString()
+      });
+    } catch (e) {
+      console.error("Erro ao salvar segmentos no Supabase:", e);
+    }
+  }
+}
+
 async function saveSingleItemToDB(item) {
   try {
     const db = await openDatabase();
-    return new Promise((resolve, reject) => {
+    await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readwrite");
       const store = tx.objectStore(STORE_NAME);
       store.put(item);
@@ -78,14 +282,24 @@ async function saveSingleItemToDB(item) {
       tx.onerror = () => reject(tx.error);
     });
   } catch (err) {
-    localStorage.setItem(DB_NAME, JSON.stringify(state.items));
+    localStorage.setItem(DB_NAME + "_items", JSON.stringify(state.items));
+  }
+
+  if (supabaseClient && state.cloudConnected) {
+    try {
+      updateCloudStatusUI("syncing", "Salvando alteração na nuvem...");
+      await supabaseClient.from(SUPABASE_ITEMS_TABLE).upsert(item);
+      updateCloudStatusUI("online", `Item "${item.item}" salvo na nuvem.`);
+    } catch (e) {
+      console.error("Erro ao salvar item no Supabase:", e);
+    }
   }
 }
 
 async function deleteItemFromDB(id) {
   try {
     const db = await openDatabase();
-    return new Promise((resolve, reject) => {
+    await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readwrite");
       const store = tx.objectStore(STORE_NAME);
       store.delete(id);
@@ -93,7 +307,15 @@ async function deleteItemFromDB(id) {
       tx.onerror = () => reject(tx.error);
     });
   } catch (err) {
-    localStorage.setItem(DB_NAME, JSON.stringify(state.items));
+    localStorage.setItem(DB_NAME + "_items", JSON.stringify(state.items));
+  }
+
+  if (supabaseClient && state.cloudConnected) {
+    try {
+      await supabaseClient.from(SUPABASE_ITEMS_TABLE).delete().eq("id", id);
+    } catch (e) {
+      console.error("Erro ao excluir item no Supabase:", e);
+    }
   }
 }
 
@@ -101,17 +323,259 @@ async function deleteItemFromDB(id) {
 // INICIALIZAÇÃO
 // ============================================================================
 document.addEventListener("DOMContentLoaded", async () => {
-  const stored = await loadItemsFromDB();
-  if (stored && stored.length > 0) {
-    state.items = stored;
+  const data = await loadDataFromDB();
+  
+  if (data.items && data.items.length > 0) {
+    state.items = data.items;
   } else {
     state.items = JSON.parse(JSON.stringify(INITIAL_INVENTORY_DATA));
-    await saveAllItemsToDB(state.items);
+    await saveAllItemsToLocalOnly(state.items);
+  }
+
+  if (data.segmentos && Array.isArray(data.segmentos) && data.segmentos.length > 0) {
+    state.segmentos = data.segmentos;
+  } else {
+    state.segmentos = [...INITIAL_SEGMENTOS];
+    // Coleta qualquer outro segmento presente nos itens
+    state.items.forEach(i => {
+      if (i.segmento && !state.segmentos.includes(i.segmento)) {
+        state.segmentos.push(i.segmento);
+      }
+    });
+    localStorage.setItem(SEGMENTS_STORAGE_KEY, JSON.stringify(state.segmentos));
   }
 
   bindEvents();
   renderAll();
+
+  // Tenta reconectar automaticamente ao Supabase se já houver credenciais salvas
+  const creds = getSavedSupabaseCredentials();
+  if (creds && creds.url && creds.key) {
+    document.getElementById("inputSupabaseUrl").value = creds.url;
+    document.getElementById("inputSupabaseKey").value = creds.key;
+    await initSupabaseConnection(creds.url, creds.key, true);
+  }
 });
+
+// ============================================================================
+// GESTÃO DE SEGMENTOS (CRIAR, EDITAR / MUDAR, EXCLUIR)
+// ============================================================================
+function renderSegmentSelectOptions(selectedVal = null) {
+  const selectFilter = document.getElementById("filterSegmento");
+  const selectForm = document.getElementById("formSegmento");
+
+  // Salva seleção atual
+  const currentFilterVal = selectedVal || selectFilter.value || "TODOS";
+  const currentFormVal = selectForm.value || (state.segmentos[0] || "");
+
+  // Popula Filtro de busca
+  selectFilter.innerHTML = `
+    <option value="TODOS">Todos os Segmentos</option>
+    ${state.segmentos.map(seg => `<option value="${seg}">${seg}</option>`).join("")}
+  `;
+  selectFilter.value = state.segmentos.includes(currentFilterVal) ? currentFilterVal : "TODOS";
+
+  // Popula Formulário de Cadastro
+  selectForm.innerHTML = state.segmentos
+    .map(seg => `<option value="${seg}">${seg}</option>`)
+    .join("");
+  if (state.segmentos.includes(currentFormVal)) {
+    selectForm.value = currentFormVal;
+  }
+
+  // Popula Chips da Sidebar
+  renderSidebarSegmentChips();
+}
+
+function renderSidebarSegmentChips() {
+  const container = document.getElementById("sidebarSegmentList");
+  if (!container) return;
+
+  const isAll = state.segmentFilter === "TODOS";
+  let html = `
+    <button class="seg-chip ${isAll ? "active" : ""}" data-seg="TODOS">
+      Todos
+    </button>
+  `;
+
+  state.segmentos.forEach(seg => {
+    const isActive = state.segmentFilter === seg;
+    const count = state.items.filter(i => i.segmento === seg).length;
+    html += `
+      <button class="seg-chip ${isActive ? "active" : ""}" data-seg="${seg}">
+        ${seg} (${count})
+      </button>
+    `;
+  });
+
+  container.innerHTML = html;
+
+  container.querySelectorAll(".seg-chip").forEach(chip => {
+    chip.addEventListener("click", () => {
+      state.segmentFilter = chip.dataset.seg;
+      document.getElementById("filterSegmento").value = state.segmentFilter;
+      renderAll();
+    });
+  });
+}
+
+function openSegmentManagerModal() {
+  renderSegmentManagerList();
+  document.getElementById("segmentModal").classList.remove("hidden");
+  document.getElementById("newSegmentInput").focus();
+}
+
+function renderSegmentManagerList() {
+  const list = document.getElementById("segmentManageList");
+  if (state.segmentos.length === 0) {
+    list.innerHTML = `<p style="color:var(--text-muted); font-size:0.85rem;">Nenhum segmento cadastrado.</p>`;
+    return;
+  }
+
+  list.innerHTML = state.segmentos.map((seg, idx) => {
+    const count = state.items.filter(i => i.segmento === seg).length;
+    return `
+      <div class="segment-manage-item" data-index="${idx}">
+        <div class="segment-name-wrap" id="seg-view-${idx}">
+          <strong>🏷️ ${seg}</strong>
+          <span style="font-size:0.75rem; color:var(--text-muted);">(${count} item(ns) associado(s))</span>
+        </div>
+        <div class="segment-name-wrap hidden" id="seg-edit-${idx}">
+          <input type="text" class="segment-edit-input" id="seg-input-${idx}" value="${seg}" />
+          <button class="btn btn-primary js-save-rename-seg" data-index="${idx}" style="padding:0.3rem 0.6rem; font-size:0.75rem;">Salvar</button>
+          <button class="btn btn-ghost js-cancel-rename-seg" data-index="${idx}" style="padding:0.3rem 0.5rem; font-size:0.75rem;">✕</button>
+        </div>
+        <div class="segment-actions" id="seg-actions-${idx}">
+          <button class="btn btn-outline js-start-rename-seg" data-index="${idx}" style="padding:0.3rem 0.6rem; font-size:0.75rem;" title="Mudar / Renomear Segmento">✏️ Renomear</button>
+          <button class="btn btn-danger js-delete-seg" data-index="${idx}" style="padding:0.3rem 0.6rem; font-size:0.75rem;" title="Excluir Segmento">🗑️</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  // Eventos de renomear
+  list.querySelectorAll(".js-start-rename-seg").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = btn.dataset.index;
+      document.getElementById(`seg-view-${idx}`).classList.add("hidden");
+      document.getElementById(`seg-actions-${idx}`).classList.add("hidden");
+      document.getElementById(`seg-edit-${idx}`).classList.remove("hidden");
+      const inp = document.getElementById(`seg-input-${idx}`);
+      inp.focus();
+      inp.select();
+    });
+  });
+
+  list.querySelectorAll(".js-cancel-rename-seg").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = btn.dataset.index;
+      document.getElementById(`seg-view-${idx}`).classList.remove("hidden");
+      document.getElementById(`seg-actions-${idx}`).classList.remove("hidden");
+      document.getElementById(`seg-edit-${idx}`).classList.add("hidden");
+    });
+  });
+
+  list.querySelectorAll(".js-save-rename-seg").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const idx = parseInt(btn.dataset.index, 10);
+      const oldName = state.segmentos[idx];
+      const newName = document.getElementById(`seg-input-${idx}`).value.trim();
+
+      if (!newName) {
+        alert("O nome do segmento não pode ficar em branco.");
+        return;
+      }
+
+      if (newName !== oldName) {
+        if (state.segmentos.includes(newName)) {
+          alert("Já existe um segmento com esse nome.");
+          return;
+        }
+
+        // Atualiza a lista de segmentos
+        state.segmentos[idx] = newName;
+        await saveSegmentsToDB(state.segmentos);
+
+        // Atualiza todos os itens que utilizavam o segmento antigo
+        let updatedCount = 0;
+        state.items.forEach(item => {
+          if (item.segmento === oldName) {
+            item.segmento = newName;
+            updatedCount++;
+          }
+        });
+
+        if (updatedCount > 0) {
+          await saveAllItemsToDB(state.items);
+        }
+
+        if (state.segmentFilter === oldName) {
+          state.segmentFilter = newName;
+        }
+      }
+
+      renderSegmentManagerList();
+      renderAll();
+    });
+  });
+
+  // Evento de excluir
+  list.querySelectorAll(".js-delete-seg").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const idx = parseInt(btn.dataset.index, 10);
+      const segName = state.segmentos[idx];
+      const associatedItems = state.items.filter(i => i.segmento === segName).length;
+
+      let msg = `Deseja realmente remover o segmento "${segName}"?`;
+      if (associatedItems > 0) {
+        msg += `\n\nAtenção: Existem ${associatedItems} item(ns) vinculados a ele. O segmento desses itens será alterado para "Geral".`;
+      }
+
+      if (confirm(msg)) {
+        state.segmentos.splice(idx, 1);
+        if (!state.segmentos.includes("Geral") && associatedItems > 0) {
+          state.segmentos.push("Geral");
+        }
+        await saveSegmentsToDB(state.segmentos);
+
+        if (associatedItems > 0) {
+          state.items.forEach(item => {
+            if (item.segmento === segName) {
+              item.segmento = "Geral";
+            }
+          });
+          await saveAllItemsToDB(state.items);
+        }
+
+        if (state.segmentFilter === segName) {
+          state.segmentFilter = "TODOS";
+        }
+
+        renderSegmentManagerList();
+        renderAll();
+      }
+    });
+  });
+}
+
+async function handleAddNewSegment() {
+  const input = document.getElementById("newSegmentInput");
+  const val = input.value.trim();
+  if (!val) {
+    alert("Digite o nome do novo segmento.");
+    return;
+  }
+  if (state.segmentos.includes(val)) {
+    alert("Este segmento já existe.");
+    return;
+  }
+
+  state.segmentos.push(val);
+  await saveSegmentsToDB(state.segmentos);
+  input.value = "";
+  renderSegmentManagerList();
+  renderAll();
+}
 
 // ============================================================================
 // UTILITÁRIOS DE FORMATAÇÃO E CLASSIFICAÇÃO
@@ -214,7 +678,7 @@ function getFilteredItems() {
       return false;
     }
 
-    // 3. Filtro de Segmento
+    // 3. Filtro de Segmento (dinâmico)
     if (state.segmentFilter !== "TODOS" && item.segmento !== state.segmentFilter) {
       return false;
     }
@@ -237,8 +701,8 @@ function getFilteredItems() {
     if (state.quickCondFilter) {
       const c = (item.conservacao || "").toLowerCase();
       if (state.quickCondFilter === "ok" && !(c === "novo" || c === "bom")) return false;
-      if (state.quickCondFilter === "medio" && !(c === "bom/médio" || c === "médio" || c === "medio")) return false;
-      if (state.quickCondFilter === "pessimo" && !(c === "médio/péssimo" || c === "péssimo" || c === "pessimo")) return false;
+      if (state.quickCondFilter === "medio" && !(c === "bom/médio" || c === "bom/medio" || c === "médio" || c === "medio")) return false;
+      if (state.quickCondFilter === "pessimo" && !(c === "médio/péssimo" || c === "medio/pessimo" || c === "péssimo" || c === "pessimo")) return false;
       if (state.quickCondFilter === "com_foto" && (!item.imagens || item.imagens.length === 0)) return false;
     }
 
@@ -257,6 +721,7 @@ function getFilteredItems() {
 // RENDERIZAÇÃO COMPLETA
 // ============================================================================
 function renderAll() {
+  renderSegmentSelectOptions();
   renderGroupCounts();
   renderSidebarCategories();
   renderCategoryStrip();
@@ -342,10 +807,11 @@ function renderCategoryStrip() {
 
 function renderHeaderTitle() {
   const meta = CATEGORY_METADATA[state.activeCategory] || CATEGORY_METADATA["Todas"];
+  const segSuffix = state.segmentFilter !== "TODOS" ? ` • Segmento: ${state.segmentFilter}` : "";
   const groupLabels = {
-    todos: "Estoque Atual + Reposição 2027",
-    estoque_atual: "Estoque Atual (Primeira Gaiola EFAF • Gaiola Elevador EM • Bolsa EFAI)",
-    reposicao_2027: "Planejamento de Compras & Reposição 2027 (EFAF • EM • EFAI)"
+    todos: `Estoque Atual + Reposição 2027${segSuffix}`,
+    estoque_atual: `Estoque Atual (Gaiolas • Bolsas • Armazéns)${segSuffix}`,
+    reposicao_2027: `Planejamento de Compras & Reposição 2027${segSuffix}`
   };
 
   document.getElementById("currentViewTitle").textContent = `${meta.icon} ${meta.label}`;
@@ -391,7 +857,7 @@ function renderItemsList() {
       <div style="grid-column: 1/-1; text-align:center; padding: 3.5rem; background: var(--bg-card); border-radius: 16px; border: 1px dashed var(--border-color);">
         <div style="font-size: 3rem; margin-bottom: 0.75rem;">🔍</div>
         <h3>Nenhum item encontrado para estes filtros</h3>
-        <p style="color: var(--text-muted); margin: 0.5rem 0 1.25rem;">Tente limpar a busca ou selecionar "Todas as Categorias".</p>
+        <p style="color: var(--text-muted); margin: 0.5rem 0 1.25rem;">Tente limpar a busca ou selecionar "Todos os Segmentos".</p>
         <button class="btn btn-primary" id="btnResetFilters">Limpar Filtros</button>
       </div>
     `;
@@ -676,6 +1142,9 @@ function openItemModal(itemId = null) {
   const form = document.getElementById("itemForm");
   const deleteBtn = document.getElementById("btnDeleteItem");
 
+  // Garante que o select de segmento tem todas as opções
+  renderSegmentSelectOptions();
+
   if (itemId) {
     const item = state.items.find((i) => i.id === itemId);
     if (!item) return;
@@ -684,7 +1153,7 @@ function openItemModal(itemId = null) {
     document.getElementById("formItemId").value = item.id;
     document.getElementById("formGroup").value = item.group || "estoque_atual";
     document.getElementById("formCategoria").value = item.categoria || "Vôlei";
-    document.getElementById("formSegmento").value = item.segmento || "EFAF";
+    document.getElementById("formSegmento").value = item.segmento || state.segmentos[0];
     document.getElementById("formLocal").value = item.local || "";
     document.getElementById("formItemName").value = item.item || "";
     document.getElementById("formMarcaModelo").value = item.marcaModelo || "";
@@ -705,6 +1174,11 @@ function openItemModal(itemId = null) {
     }
     if (state.activeGroup !== "todos") {
       document.getElementById("formGroup").value = state.activeGroup;
+    }
+    if (state.segmentFilter !== "TODOS") {
+      document.getElementById("formSegmento").value = state.segmentFilter;
+    } else {
+      document.getElementById("formSegmento").value = state.segmentos[0] || "";
     }
     deleteBtn.classList.add("hidden");
   }
@@ -776,6 +1250,120 @@ function bindEvents() {
   document.getElementById("filterPrioridade").addEventListener("change", (e) => {
     state.prioridadeFilter = e.target.value;
     renderAll();
+  });
+
+  // Gestão de Segmentos
+  document.getElementById("btnManageSegments").addEventListener("click", openSegmentManagerModal);
+  document.getElementById("btnManageSegmentsTopbar").addEventListener("click", openSegmentManagerModal);
+  const btnFilterSeg = document.getElementById("btnManageSegmentsFilter");
+  if (btnFilterSeg) {
+    btnFilterSeg.addEventListener("click", openSegmentManagerModal);
+  }
+
+  // Modal de Conexão Supabase Cloud
+  const btnCloud = document.getElementById("btnCloudConfig");
+  if (btnCloud) {
+    btnCloud.addEventListener("click", () => {
+      document.getElementById("supabaseModal").classList.remove("hidden");
+    });
+  }
+  document.getElementById("closeSupabaseModal").addEventListener("click", () => {
+    document.getElementById("supabaseModal").classList.add("hidden");
+  });
+
+  document.getElementById("btnConnectSupabase").addEventListener("click", async () => {
+    const url = document.getElementById("inputSupabaseUrl").value.trim();
+    const key = document.getElementById("inputSupabaseKey").value.trim();
+    if (!url || !key) {
+      alert("Por favor, preencha a Project URL e a API Key (anon/public) do Supabase.");
+      return;
+    }
+    localStorage.setItem(SUPABASE_CONFIG_KEY, JSON.stringify({ url, key }));
+    const ok = await initSupabaseConnection(url, key, true);
+    if (ok) {
+      alert("✅ Conectado ao Supabase com sucesso! Seus dados agora estão sincronizados online.");
+    }
+  });
+
+  document.getElementById("btnPushLocalToCloud").addEventListener("click", async () => {
+    if (!supabaseClient || !state.cloudConnected) {
+      alert("Conecte-se ao Supabase primeiro.");
+      return;
+    }
+    updateCloudStatusUI("syncing", "Enviando todos os itens locais para o Supabase...");
+    const { error } = await supabaseClient.from(SUPABASE_ITEMS_TABLE).upsert(state.items);
+    await saveSegmentsToDB(state.segmentos);
+    if (error) {
+      updateCloudStatusUI("offline", `Erro ao enviar: ${error.message}`);
+    } else {
+      updateCloudStatusUI("online", `Todos os ${state.items.length} itens locais foram enviados para a nuvem!`);
+      alert("⬆️ Dados locais enviados para o Supabase com sucesso!");
+    }
+  });
+
+  document.getElementById("btnPullCloudToLocal").addEventListener("click", async () => {
+    if (!supabaseClient || !state.cloudConnected) {
+      alert("Conecte-se ao Supabase primeiro.");
+      return;
+    }
+    updateCloudStatusUI("syncing", "Baixando dados da nuvem...");
+    const { data, error } = await supabaseClient.from(SUPABASE_ITEMS_TABLE).select("*");
+    if (error) {
+      updateCloudStatusUI("offline", `Erro ao baixar: ${error.message}`);
+    } else if (data) {
+      state.items = data;
+      await saveAllItemsToLocalOnly(state.items);
+      renderAll();
+      updateCloudStatusUI("online", `${data.length} itens baixados da nuvem.`);
+      alert("⬇️ Dados atualizados a partir da nuvem!");
+    }
+  });
+
+  document.getElementById("btnDisconnectSupabase").addEventListener("click", () => {
+    localStorage.removeItem(SUPABASE_CONFIG_KEY);
+    if (realtimeChannel && supabaseClient) {
+      supabaseClient.removeChannel(realtimeChannel);
+    }
+    supabaseClient = null;
+    updateCloudStatusUI("offline", "Desconectado. Operando em modo local.");
+  });
+
+  document.getElementById("btnCopySql").addEventListener("click", () => {
+    const sqlText = document.getElementById("sqlCodeBlock").textContent;
+    navigator.clipboard.writeText(sqlText);
+    const btn = document.getElementById("btnCopySql");
+    btn.textContent = "✅ SQL Copiado!";
+    setTimeout(() => (btn.textContent = "📋 Copiar SQL"), 2000);
+  });
+  document.getElementById("closeSegmentModal").addEventListener("click", () => {
+    document.getElementById("segmentModal").classList.add("hidden");
+  });
+  document.getElementById("btnCloseSegmentModalBtn").addEventListener("click", () => {
+    document.getElementById("segmentModal").classList.add("hidden");
+  });
+  document.getElementById("btnAddNewSegment").addEventListener("click", handleAddNewSegment);
+  document.getElementById("newSegmentInput").addEventListener("keypress", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleAddNewSegment();
+    }
+  });
+
+  // Atalho rápido no modal de item para criar segmento
+  document.getElementById("linkCreateSegmentFast").addEventListener("click", (e) => {
+    e.preventDefault();
+    const newSeg = prompt("Digite o nome do novo segmento:");
+    if (newSeg && newSeg.trim()) {
+      const trimmed = newSeg.trim();
+      if (!state.segmentos.includes(trimmed)) {
+        state.segmentos.push(trimmed);
+        saveSegmentsToDB(state.segmentos);
+        renderSegmentSelectOptions();
+        document.getElementById("formSegmento").value = trimmed;
+      } else {
+        document.getElementById("formSegmento").value = trimmed;
+      }
+    }
   });
 
   // KPIs clicáveis para filtro rápido de condição
@@ -913,9 +1501,14 @@ function bindEvents() {
   // Exportar CSV
   document.getElementById("btnExportCSV").addEventListener("click", exportToCSV);
 
-  // Exportar Backup JSON (com fotos)
+  // Exportar Backup JSON (com fotos e segmentos)
   document.getElementById("btnExportBackup").addEventListener("click", () => {
-    const dataStr = JSON.stringify(state.items, null, 2);
+    const backupObj = {
+      items: state.items,
+      segmentos: state.segmentos,
+      exportedAt: new Date().toISOString()
+    };
+    const dataStr = JSON.stringify(backupObj, null, 2);
     const blob = new Blob([dataStr], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -935,10 +1528,16 @@ function bindEvents() {
         const imported = JSON.parse(ev.target.result);
         if (Array.isArray(imported)) {
           state.items = imported;
-          await saveAllItemsToDB(state.items);
-          renderAll();
-          alert("Backup importado com sucesso!");
+        } else if (imported && imported.items) {
+          state.items = imported.items;
+          if (Array.isArray(imported.segmentos)) {
+            state.segmentos = imported.segmentos;
+            await saveSegmentsToDB(state.segmentos);
+          }
         }
+        await saveAllItemsToDB(state.items);
+        renderAll();
+        alert("Backup importado com sucesso!");
       } catch (err) {
         alert("Arquivo de backup inválido.");
       }
@@ -948,9 +1547,11 @@ function bindEvents() {
 
   // Restaurar dados originais da planilha
   document.getElementById("btnResetData").addEventListener("click", async () => {
-    if (confirm("Deseja restaurar os dados originais da planilha? Isso removerá edições ou fotos adicionadas.")) {
+    if (confirm("Deseja restaurar os dados originais da planilha? Isso redefinirá os segmentos e itens para o estado inicial.")) {
       state.items = JSON.parse(JSON.stringify(INITIAL_INVENTORY_DATA));
+      state.segmentos = [...INITIAL_SEGMENTOS];
       await saveAllItemsToDB(state.items);
+      await saveSegmentsToDB(state.segmentos);
       renderAll();
     }
   });
